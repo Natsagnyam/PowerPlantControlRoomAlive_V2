@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: generator-lab-ingress
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  rules:
+  - host: generator-lab.yourdomain.org
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: generator-lab-svc
+            port:
+              number: 9000
+  tls:
+  - hosts:
+    - generator-lab.yourdomain.org
+    secretName: generator-lab-tls

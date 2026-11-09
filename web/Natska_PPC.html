@@ -1,0 +1,1101 @@
+```html
+<!--
+BeagleBone Black One-Command Execution Header
+Run directly from BBB CLI:
+    python3 index.html
+Or:
+    python3 -c "import sys; exec(open('index.html').read())"
+-->
+<script type="text/python" id="bbb-server-script">
+import os
+import sys
+import time
+import json
+import asyncio
+import websockets
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+import threading
+
+# --- BEAGLEBONE BLACK USR3 / LED3 SYSFS CONTROL ---
+LED3_PATHS = [
+    "/sys/class/leds/beaglebone:green:usr3",
+    "/sys/class/leds/usr3",
+    "/sys/class/leds/beaglebone:blue:usr3"
+]
+
+LED3_BASE = None
+for p in LED3_PATHS:
+    if os.path.exists(p):
+        LED3_BASE = p
+        break
+
+def init_usr3_led():
+    if not LED3_BASE:
+        print("[BBB HW Warning] USR3 LED sysfs path not found (Running on simulation host).")
+        return False
+    try:
+        # Release trigger from mmc1/eMMC to manual software control
+        trigger_path = os.path.join(LED3_BASE, "trigger")
+        with open(trigger_path, "w") as f:
+            f.write("none")
+        print(f"[BBB HW] Successfully configured USR3 LED at {LED3_BASE}")
+        return True
+    except Exception as e:
+        print(f"[BBB HW Error] Could not initialize USR3 LED: {e}")
+        return False
+
+def set_usr3_led(state: bool):
+    if not LED3_BASE:
+        return
+    try:
+        bright_path = os.path.join(LED3_BASE, "brightness")
+        with open(bright_path, "w") as f:
+            f.write("255" if state else "0")
+    except Exception as e:
+        pass
+
+# Flasher Thread State
+alarm_active = False
+
+def led_flasher_thread():
+    global alarm_active
+    led_state = False
+    while True:
+        if alarm_active:
+            led_state = not led_state
+            set_usr3_led(led_state)
+            time.sleep(0.15) # 150ms rapid flash during alarm state
+        else:
+            set_usr3_led(False)
+            time.sleep(0.3)
+
+# --- WEBSOCKET HANDLER ---
+async def ws_handler(websocket, path):
+    global alarm_active
+    async for message in websocket:
+        try:
+            data = json.loads(message)
+            # Alarm state received from dashboard evaluation
+            alarm_active = data.get("alarm_active", False)
+        except Exception as e:
+            pass
+
+def start_http_server():
+    server_address = ('', 8000)
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    print("=========================================================")
+    print(" Synchronous Generator Control Room - BBB Control Dashboard")
+    print(" Author: Natska Natsagnyam NAMKHAI MR")
+    print("=========================================================")
+    print(" HTTP Server running at: http://0.0.0.0:8000")
+    print(" WebSocket listening on port 8001")
+    print(" BBB Hardware LED3 (USR3) enabled for limit alarms.")
+    print("=========================================================")
+    httpd.serve_forever()
+
+if __name__ == "__main__":
+    init_usr3_led()
+    t_flash = threading.Thread(target=led_flasher_thread, daemon=True)
+    t_flash.start()
+    
+    t_http = threading.Thread(target=start_http_server, daemon=True)
+    t_http.start()
+
+    start_server = websockets.serve(ws_handler, "0.0.0.0", 8001)
+    asyncio.get_event_loop().run_until_complete(start_server)
+    asyncio.get_event_loop().run_forever()
+</script>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synchronous Generator Control Room - Natska Natsagnyam NAMKHAI Mr</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800;900&family=Rajdhani:wght@500;600;700&display=swap');
+
+    body {
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      font-family: 'Rajdhani', sans-serif;
+    }
+
+    .font-orbitron {
+      font-family: 'Orbitron', sans-serif;
+    }
+
+    .panel-card {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.2);
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+      backdrop-filter: blur(8px);
+    }
+
+    .panel-card:hover {
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+
+    .glow-text-amber {
+      text-shadow: 0 0 10px rgba(245, 158, 11, 0.6);
+    }
+
+    /* Indicator Lamp Animations */
+    .indicator {
+      transition: all 0.3s ease;
+    }
+    .indicator-active-red {
+      background-color: #ef4444;
+      box-shadow: 0 0 15px #ef4444, inset 0 0 8px #fee2e2;
+      color: #fff;
+    }
+    .indicator-active-amber {
+      background-color: #f59e0b;
+      box-shadow: 0 0 15px #f59e0b, inset 0 0 8px #fef3c7;
+      color: #fff;
+    }
+    .indicator-off {
+      background-color: #1e293b;
+      color: #475569;
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.6);
+    }
+
+    /* Custom Range Sliders */
+    input[type=range] {
+      -webkit-appearance: none;
+      background: #1e293b;
+      height: 8px;
+      border-radius: 4px;
+      outline: none;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #06b6d4;
+      cursor: pointer;
+      box-shadow: 0 0 10px #06b6d4;
+      transition: transform 0.1s;
+    }
+    input[type=range]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col justify-between p-3 md:p-6">
+
+  <!-- ================= TOP HEADER ================= -->
+  <header class="panel-card rounded-xl p-4 mb-4 flex flex-col md:flex-row items-center justify-between border-b-2 border-cyan-500">
+    <div class="flex items-center space-x-3 mb-2 md:mb-0">
+      <i class="fa-solid fa-bolt-lightning text-cyan-400 text-3xl animate-pulse"></i>
+      <div>
+        <h1 class="text-2xl md:text-3xl font-extrabold tracking-wider font-orbitron text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-teal-300 to-indigo-400">
+          SYNCHRONOUS GENERATOR / PP CONTROL ROOM
+        </h1>
+        <p class="text-xs text-cyan-400 font-semibold tracking-widest uppercase">BeagleBone Black Hardware & Dynamic Stability Simulator</p>
+        <p class="text-xs text-cyan-400 font-semibold tracking-widest uppercase">Dedicated as a timeless gift of gratitude to my esteemed mentor, Professor Dr. Peter Crossley at UMIST, Manchester—whose rigorous guidance and brilliance bridge the chasm between raw physical reality and engineering truth. Former GEC Alstom engineer Natska Natsagnyam NAMKHAI MR. 2026 Nov</p>
+      </div>
+    </div>
+    
+    <!-- Prominent Author Text -->
+    <div class="bg-slate-900/90 border border-cyan-500/40 px-4 py-2 rounded-lg text-center shadow-lg">
+      <span class="text-xs text-slate-400 block font-semibold uppercase tracking-wider">Lead Systems Engineer / State Laureate</span>
+      <span class="text-lg font-orbitron font-bold text-amber-400 glow-text-amber">
+        Author Natska Natsagnyam NAMKHAI MR
+      </span>
+    </div>
+  </header>
+
+  <!-- ================= MODE SELECTION CONTROL BAR ================= -->
+  <section class="panel-card rounded-xl p-3 mb-4">
+    <div class="flex flex-col sm:flex-row items-center justify-between gap-3">
+      <span class="font-orbitron text-sm font-bold text-cyan-300 flex items-center gap-2">
+        <i class="fa-solid fa-sliders"></i> CONTROL ARCHITECTURE MODE:
+      </span>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full sm:w-auto">
+        <button id="btn-anim1" onclick="switchControlMode('Animation_1')" class="px-4 py-2.5 rounded-lg font-orbitron text-xs md:text-sm font-bold transition-all duration-200 border border-cyan-500/50 bg-cyan-950/60 text-cyan-300 hover:bg-cyan-500 hover:text-slate-950 shadow-lg">
+          Animation_1: Excitation Control (MVAR)
+        </button>
+        <button id="btn-anim2" onclick="switchControlMode('Animation_2')" class="px-4 py-2.5 rounded-lg font-orbitron text-xs md:text-sm font-bold transition-all duration-200 border border-slate-700 bg-slate-900 text-slate-400 hover:border-cyan-500 hover:text-cyan-300">
+          Animation_2: Governor Control (MW)
+        </button>
+        <button id="btn-anim3" onclick="switchControlMode('Animation_3')" class="px-4 py-2.5 rounded-lg font-orbitron text-xs md:text-sm font-bold transition-all duration-200 border border-slate-700 bg-slate-900 text-slate-400 hover:border-cyan-500 hover:text-cyan-300">
+          Animation_3: Free Oscillation & PSS
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= MAIN DASHBOARD GRID ================= -->
+  <main class="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-grow">
+    
+    <!-- LEFT COLUMN: CONTROLS & CAPABILITY DIAGRAM (5 cols) -->
+    <div class="lg:col-span-5 flex flex-col gap-4">
+      
+      <!-- Interactive Parameter Controls -->
+      <div class="panel-card rounded-xl p-4">
+        <h2 class="font-orbitron text-base font-bold text-cyan-400 border-b border-slate-700 pb-2 mb-3 flex items-center justify-between">
+          <span><i class="fa-solid fa-gears mr-2"></i>OPERATIONAL CONTROLS</span>
+          <span id="current-mode-tag" class="text-xs px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-700">MODE 1</span>
+        </h2>
+
+        <!-- Controls for Animation 1 & 2 -->
+        <div id="controls-anim1-2" class="space-y-4">
+          <!-- Excitation Slider (Animation 1) -->
+          <div id="container-excitation" class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <label class="text-sm font-bold text-slate-300">Raise / Lower Excitation / Field Voltage / Rotor Magnets / MVAR / Volts</label>
+              <span id="val-excitation" class="text-sm font-orbitron font-bold text-cyan-400">+0.00 MVAR</span>
+            </div>
+            <input type="range" id="slider-excitation" min="-0.8" max="1.0" step="0.01" value="0" class="w-full">
+            <div class="flex justify-between text-xs text-slate-500 mt-1">
+              <span>Leading (Absorb VAR)</span>
+              <span>Lagging (Generate VAR)</span>
+            </div>
+          </div>
+
+          <!-- Governor / MW Slider (Animation 2) -->
+          <div id="container-governor" class="bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <label class="text-sm font-bold text-slate-300">Raise / Lower Steam / Turbine speed / MW Power / Hz</label>
+              <span id="val-governor" class="text-sm font-orbitron font-bold text-emerald-400">0.70 MW (pu)</span>
+            </div>
+            <input type="range" id="slider-governor" min="0.0" max="1.15" step="0.01" value="0.70" class="w-full">
+            <div class="flex justify-between text-xs text-slate-500 mt-1">
+              <span>0.0 MW (No Load)</span>
+              <span>1.15 MW (Overload)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Controls for Animation 3 (PSS) -->
+        <div id="controls-anim3" class="hidden space-y-4">
+          <div class="bg-slate-900/80 p-3 rounded-lg border border-emerald-500/30 flex items-center justify-between">
+            <div>
+              <div class="font-orbitron text-sm font-bold text-emerald-400">PSS Injection into AVR</div>
+              <div class="text-xs text-slate-400">Injects Line5 output into Exciter to damp 0.1Hz oscillation</div>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" id="toggle-pss" class="sr-only peer" onchange="togglePSS(this.checked)">
+              <div class="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
+            </label>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+              <label class="text-xs font-bold text-slate-300 block mb-1">Lead Time Const ($T_1$)</label>
+              <input type="range" id="slider-t1" min="0.1" max="3.0" step="0.1" value="1.2" class="w-full">
+              <div class="text-right text-xs font-orbitron text-cyan-400" id="val-t1">1.2 s</div>
+            </div>
+            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+              <label class="text-xs font-bold text-slate-300 block mb-1">Lag Time Const ($T_2$)</label>
+              <input type="range" id="slider-t2" min="0.01" max="1.0" step="0.01" value="0.15" class="w-full">
+              <div class="text-right text-xs font-orbitron text-cyan-400" id="val-t2">0.15 s</div>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+              <label class="text-xs font-bold text-slate-300 block mb-1">Washout Const ($T_w$)</label>
+              <input type="range" id="slider-tw" min="1.0" max="10.0" step="0.5" value="5.0" class="w-full">
+              <div class="text-right text-xs font-orbitron text-cyan-400" id="val-tw">5.0 s</div>
+            </div>
+            <div class="bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+              <label class="text-xs font-bold text-slate-300 block mb-1">Limiter Max ($V_{pss}$)</label>
+              <input type="range" id="slider-vpss" min="0.05" max="0.3" step="0.01" value="0.10" class="w-full">
+              <div class="text-right text-xs font-orbitron text-cyan-400" id="val-vpss">&plusmn;0.10 pu</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Salient-Pole Capability Curve Diagram -->
+      <div class="panel-card rounded-xl p-4 flex-grow flex flex-col">
+        <div class="flex justify-between items-center border-b border-slate-700 pb-2 mb-2">
+          <h2 class="font-orbitron text-sm font-bold text-cyan-400">
+            <i class="fa-solid fa-chart-pie mr-1"></i> P-Q CAPABILITY DIAGRAM (Salient-Pole Machine)
+          </h2>
+          <span class="text-xs text-slate-400 font-mono">P-Q Vector Field</span>
+        </div>
+        
+        <div class="relative flex-grow min-h-[300px] w-full flex items-center justify-center">
+          <canvas id="capabilityCanvas" class="w-full h-full rounded-lg bg-slate-950/70 border border-slate-800"></canvas>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2 mt-3 text-center text-xs font-orbitron">
+          <div class="bg-slate-900/90 p-1.5 rounded border border-slate-800">
+            <span class="text-slate-400 block text-[10px]">ACTIVE POWER (P)</span>
+            <span id="telemetry-p" class="text-emerald-400 font-bold text-sm">0.70 pu</span>
+          </div>
+          <div class="bg-slate-900/90 p-1.5 rounded border border-slate-800">
+            <span class="text-slate-400 block text-[10px]">REACTIVE POWER (Q)</span>
+            <span id="telemetry-q" class="text-cyan-400 font-bold text-sm">+0.30 pu</span>
+          </div>
+          <div class="bg-slate-900/90 p-1.5 rounded border border-slate-800">
+            <span class="text-slate-400 block text-[10px]">POWER ANGLE (&delta;)</span>
+            <span id="telemetry-delta" class="text-amber-400 font-bold text-sm">34.2&deg;</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT COLUMN: TELEMETRY, GAUGES & TIME-DOMAIN PLOTS (7 cols) -->
+    <div class="lg:col-span-7 flex flex-col gap-4">
+
+      <!-- TOP METRICS & WARNING PANELS & PF GAUGE -->
+      <div class="grid grid-cols-1 md:grid-cols-12 gap-4">
+        
+        <!-- Warning & Status Panel (7 cols) -->
+        <div class="md:col-span-7 panel-card rounded-xl p-4 flex flex-col justify-between">
+          <div class="flex justify-between items-center border-b border-slate-800 pb-1 mb-2">
+            <h2 class="font-orbitron text-xs font-bold text-slate-400 uppercase tracking-wider">
+              <i class="fa-solid fa-triangle-exclamation text-amber-400 mr-1"></i> Control Room Limit Indicators
+            </h2>
+            <div id="bbb-led-badge" class="text-[10px] font-orbitron px-2 py-0.5 rounded bg-slate-800 text-slate-400 flex items-center gap-1">
+              <i class="fa-solid fa-microchip"></i> BBB USR3: OFF
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 gap-2 my-auto">
+            <!-- Prime Mover Limit Indicator -->
+            <div id="ind-prime-mover" class="indicator indicator-off p-2 rounded-lg font-orbitron text-xs font-bold flex items-center justify-between">
+              <span class="flex items-center gap-2">
+                <i class="fa-solid fa-gears"></i> PRIME-MOVER TURBINE LIMIT
+              </span>
+              <span class="status-tag text-[10px] px-2 py-0.5 rounded bg-slate-950/50">NORMAL</span>
+            </div>
+
+            <!-- Stator Overcurrent / Heating Limit Indicator -->
+            <div id="ind-stator" class="indicator indicator-off p-2 rounded-lg font-orbitron text-xs font-bold flex items-center justify-between">
+              <span class="flex items-center gap-2">
+                <i class="fa-solid fa-temperature-high"></i> STATOR OVERCURRENT / HEATING
+              </span>
+              <span class="status-tag text-[10px] px-2 py-0.5 rounded bg-slate-950/50">NORMAL</span>
+            </div>
+
+            <!-- Rotor Overcurrent / Field Limit Indicator -->
+            <div id="ind-rotor" class="indicator indicator-off p-2 rounded-lg font-orbitron text-xs font-bold flex items-center justify-between">
+              <span class="flex items-center gap-2">
+                <i class="fa-solid fa-magnet"></i> ROTOR OVERCURRENT / FIELD LIMIT
+              </span>
+              <span class="status-tag text-[10px] px-2 py-0.5 rounded bg-slate-950/50">NORMAL</span>
+            </div>
+
+            <!-- Pole Slip / Practical Stability Limit Indicator -->
+            <div id="ind-poleslip" class="indicator indicator-off p-2 rounded-lg font-orbitron text-xs font-bold flex items-center justify-between">
+              <span class="flex items-center gap-2">
+                <i class="fa-solid fa-burst"></i> POLE SLIP / STABILITY LIMIT
+              </span>
+              <span class="status-tag text-[10px] px-2 py-0.5 rounded bg-slate-950/50">STABLE</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Round Power Factor Meter Gauge (5 cols) -->
+        <div class="md:col-span-5 panel-card rounded-xl p-3 flex flex-col items-center justify-center relative">
+          <h2 class="font-orbitron text-xs font-bold text-slate-400 uppercase tracking-wider self-start mb-1">
+            <i class="fa-solid fa-gauge-high text-cyan-400 mr-1"></i> Power Factor Meter
+          </h2>
+          <div class="relative w-40 h-40 flex items-center justify-center">
+            <canvas id="pfGaugeCanvas" width="160" height="160"></canvas>
+          </div>
+          <div id="pf-value-display" class="font-orbitron font-bold text-sm text-cyan-300 mt-1">
+            PF: 0.92 LAG
+          </div>
+        </div>
+
+      </div>
+
+      <!-- MAIN GRAPH CONTAINER -->
+      <div class="panel-card rounded-xl p-4 flex-grow flex flex-col">
+        
+        <!-- Graph Title Bar -->
+        <div class="flex justify-between items-center border-b border-slate-700 pb-2 mb-3">
+          <h2 id="graph-title" class="font-orbitron text-sm font-bold text-cyan-400 flex items-center gap-2">
+            <i class="fa-solid fa-chart-line"></i> REAL-TIME WAVEFORM SCOPE (V, I, MW, MVAR)
+          </h2>
+          <div class="flex items-center gap-2 text-xs font-mono">
+            <span class="inline-block w-2.5 h-2.5 rounded-full bg-cyan-400 animate-ping"></span>
+            <span class="text-slate-400">LIVE FEED</span>
+          </div>
+        </div>
+
+        <!-- Canvas for Chart.js Plot -->
+        <div class="relative flex-grow min-h-[280px] w-full">
+          <canvas id="mainChart"></canvas>
+        </div>
+
+        <!-- Legend Footer for Animation 3 Signal Chain -->
+        <div id="anim3-legend-footer" class="hidden grid grid-cols-2 sm:grid-cols-5 gap-2 mt-3 text-[11px] font-orbitron">
+          <div class="p-1.5 rounded bg-amber-950/40 border border-amber-500/40 text-amber-300 text-center">Line1: Rotor Osc.</div>
+          <div class="p-1.5 rounded bg-blue-950/40 border border-blue-500/40 text-blue-300 text-center">Line2: Raw Washout</div>
+          <div class="p-1.5 rounded bg-teal-950/40 border border-teal-500/40 text-teal-300 text-center">Line3: No DC Offset</div>
+          <div class="p-1.5 rounded bg-purple-950/40 border border-purple-500/40 text-purple-300 text-center">Line4: Lead-Lag Out</div>
+          <div class="p-1.5 rounded bg-rose-950/40 border border-rose-500/40 text-rose-300 text-center font-bold">Line5: PSS Output</div>
+        </div>
+
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- ================= FOOTER ================= -->
+  <footer class="mt-4 text-center text-xs text-slate-500 font-orbitron py-2 border-t border-slate-800 flex flex-col sm:flex-row justify-between items-center px-4">
+    <span>Synchronous Generator Control Room Dynamics Simulator &bull; Salient-Pole BBB Hardware Control</span>
+    <span class="text-cyan-400">Author: Natska Natsagnyam NAMKHAI</span>
+  </footer>
+
+  <!-- ================= JAVASCRIPT ARCHITECTURE & HARDWARE WEBSOCKET ================= -->
+  <script>
+    let currentMode = 'Animation_1';
+    let ws = null;
+    let bbbAlarmState = false;
+
+    // Generator Operational Parameters (Salient-Pole Machine)
+    const GenParams = {
+      Xd: 1.1,      
+      Xq: 0.7,      
+      V_terminal: 1.0, 
+      
+      P_prime_mover_max: 0.8, 
+      I_stator_max: 1.0,     
+      E_rotor_max: 1.75,      
+      
+      P: 0.70,        
+      Q: 0,        
+      E_f: 1.5,      
+      delta: 0.55,    
+      pf: 1,       
+      pf_type: 'LAG', 
+      
+      osc_freq: 0.1,  
+      osc_time: 0,
+      pss_enabled: false,
+      pss_gain: 1.0,
+      t1: 1.2,
+      t2: 0.15,
+      tw: 5.0,
+      vpss_limit: 0.10
+    };
+
+    let mainChart = null;
+    let capCanvas, capCtx;
+    let pfCanvas, pfCtx;
+
+    window.onload = function() {
+      capCanvas = document.getElementById('capabilityCanvas');
+      capCtx = capCanvas.getContext('2d');
+      pfCanvas = document.getElementById('pfGaugeCanvas');
+      pfCtx = pfCanvas.getContext('2d');
+
+      resizeCanvases();
+      window.addEventListener('resize', resizeCanvases);
+
+      setupEventListeners();
+      initChart();
+      initWebSocket();
+      switchControlMode('Animation_1');
+
+      requestAnimationFrame(animationLoop);
+    };
+
+    // WebSocket connection to Python BBB Sysfs Hardware Controller
+    function initWebSocket() {
+      const wsHost = window.location.hostname || 'localhost';
+      try {
+        ws = new WebSocket(`ws://${wsHost}:8001`);
+        ws.onopen = () => console.log("[BBB WS] Connected to BBB Hardware Server.");
+        ws.onerror = () => console.log("[BBB WS] Hardware WS socket offline (Simulation Mode).");
+      } catch (e) {
+        console.log("[BBB WS] WebSocket exception:", e);
+      }
+    }
+
+    function sendBBBHardwareAlarm(alarmActive) {
+      bbbAlarmState = alarmActive;
+      const badge = document.getElementById('bbb-led-badge');
+      if (alarmActive) {
+        badge.className = "text-[10px] font-orbitron px-2 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-500 animate-pulse flex items-center gap-1";
+        badge.innerHTML = `<i class="fa-solid fa-lightbulb text-rose-400"></i> BBB USR3: FLASHING`;
+      } else {
+        badge.className = "text-[10px] font-orbitron px-2 py-0.5 rounded bg-slate-800 text-slate-400 flex items-center gap-1";
+        badge.innerHTML = `<i class="fa-solid fa-microchip"></i> BBB USR3: OFF`;
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ alarm_active: alarmActive }));
+      }
+    }
+
+    function resizeCanvases() {
+      if (capCanvas && capCanvas.parentElement) {
+        capCanvas.width = capCanvas.parentElement.clientWidth;
+        capCanvas.height = capCanvas.parentElement.clientHeight;
+      }
+    }
+
+    function switchControlMode(mode) {
+      currentMode = mode;
+
+      ['Animation_1', 'Animation_2', 'Animation_3'].forEach(m => {
+        const btn = document.getElementById(`btn-anim${m.slice(-1)}`);
+        if (m === mode) {
+          btn.className = "px-4 py-2.5 rounded-lg font-orbitron text-xs md:text-sm font-bold border border-cyan-500 bg-cyan-950/80 text-cyan-300 shadow-lg shadow-cyan-950/50";
+        } else {
+          btn.className = "px-4 py-2.5 rounded-lg font-orbitron text-xs md:text-sm font-bold border border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-600 hover:text-slate-200";
+        }
+      });
+
+      document.getElementById('current-mode-tag').innerText = mode.replace('_', ' ').toUpperCase();
+
+      const controlsAnim12 = document.getElementById('controls-anim1-2');
+      const controlsAnim3 = document.getElementById('controls-anim3');
+      const containerExc = document.getElementById('container-excitation');
+      const containerGov = document.getElementById('container-governor');
+      const legendFooter = document.getElementById('anim3-legend-footer');
+      const graphTitle = document.getElementById('graph-title');
+
+      switch(currentMode) {
+        case 'Animation_1':
+          controlsAnim12.classList.remove('hidden');
+          controlsAnim3.classList.add('hidden');
+          containerExc.classList.remove('opacity-40', 'pointer-events-none');
+          containerGov.classList.add('opacity-40', 'pointer-events-none');
+          legendFooter.classList.add('hidden');
+          graphTitle.innerHTML = `<i class="fa-solid fa-chart-line"></i> REAL-TIME WAVEFORM SCOPE (V, I, MW, MVAR)`;
+          break;
+
+        case 'Animation_2':
+          controlsAnim12.classList.remove('hidden');
+          controlsAnim3.classList.add('hidden');
+          containerExc.classList.add('opacity-40', 'pointer-events-none');
+          containerGov.classList.remove('opacity-40', 'pointer-events-none');
+          legendFooter.classList.add('hidden');
+          graphTitle.innerHTML = `<i class="fa-solid fa-chart-line"></i> REAL-TIME WAVEFORM SCOPE (V, I, MW, MVAR)`;
+          break;
+
+        case 'Animation_3':
+          controlsAnim12.classList.add('hidden');
+          controlsAnim3.classList.remove('hidden');
+          legendFooter.classList.remove('hidden');
+          graphTitle.innerHTML = `<i class="fa-solid fa-wave-square text-amber-400"></i> PSS DYNAMICS & ROTOR OSCILLATION SCOPE (0.1 Hz)`;
+          GenParams.P = 0.65;
+          GenParams.Q = 0.20;
+          break;
+      }
+
+      setupChartDatasets();
+    }
+
+    function setupEventListeners() {
+      document.getElementById('slider-excitation').addEventListener('input', (e) => {
+        if (currentMode === 'Animation_1') {
+          GenParams.Q = parseFloat(e.target.value);
+          document.getElementById('val-excitation').innerText = 
+            (GenParams.Q >= 0 ? '+' : '') + GenParams.Q.toFixed(2) + " MVAR";
+        }
+      });
+
+      document.getElementById('slider-governor').addEventListener('input', (e) => {
+        if (currentMode === 'Animation_2') {
+          GenParams.P = parseFloat(e.target.value);
+          document.getElementById('val-governor').innerText = 
+            GenParams.P.toFixed(2) + " MW (pu)";
+        }
+      });
+
+      document.getElementById('slider-t1').addEventListener('input', (e) => {
+        GenParams.t1 = parseFloat(e.target.value);
+        document.getElementById('val-t1').innerText = GenParams.t1.toFixed(1) + " s";
+      });
+      document.getElementById('slider-t2').addEventListener('input', (e) => {
+        GenParams.t2 = parseFloat(e.target.value);
+        document.getElementById('val-t2').innerText = GenParams.t2.toFixed(2) + " s";
+      });
+      document.getElementById('slider-tw').addEventListener('input', (e) => {
+        GenParams.tw = parseFloat(e.target.value);
+        document.getElementById('val-tw').innerText = GenParams.tw.toFixed(1) + " s";
+      });
+      document.getElementById('slider-vpss').addEventListener('input', (e) => {
+        GenParams.vpss_limit = parseFloat(e.target.value);
+        document.getElementById('val-vpss').innerText = "±" + GenParams.vpss_limit.toFixed(2) + " pu";
+      });
+    }
+
+    function togglePSS(enabled) {
+      GenParams.pss_enabled = enabled;
+    }
+
+    function updatePhysics() {
+      const S = Math.sqrt(GenParams.P * GenParams.P + GenParams.Q * GenParams.Q);
+      GenParams.pf = S > 0 ? Math.min(1.0, Math.abs(GenParams.P) / S) : 1.0;
+      GenParams.pf_type = GenParams.Q >= 0 ? 'LAG' : 'LEAD';
+
+      const num = GenParams.P * GenParams.Xq;
+      const den = GenParams.V_terminal + GenParams.Q * GenParams.Xq;
+      GenParams.delta = Math.atan2(num, den);
+
+      GenParams.E_f = Math.sqrt(Math.pow(GenParams.V_terminal + GenParams.Q * GenParams.Xd, 2) + Math.pow(GenParams.P * GenParams.Xd, 2));
+
+      document.getElementById('telemetry-p').innerText = GenParams.P.toFixed(2) + " pu";
+      document.getElementById('telemetry-q').innerText = (GenParams.Q >= 0 ? '+' : '') + GenParams.Q.toFixed(2) + " pu";
+      document.getElementById('telemetry-delta').innerText = (GenParams.delta * 180 / Math.PI).toFixed(1) + "°";
+
+      checkLimitWarnings();
+    }
+
+    function checkLimitWarnings() {
+      let isAlarmTriggered = false;
+
+      // 1. Prime Mover Limit
+      const pmInd = document.getElementById('ind-prime-mover');
+      if (GenParams.P >= GenParams.P_prime_mover_max) {
+        setIndicator(pmInd, 'indicator-active-amber', 'TURBINE LIMIT EXCEEDED');
+        isAlarmTriggered = true;
+      } else {
+        setIndicator(pmInd, 'indicator-off', 'NORMAL');
+      }
+
+      // 2. Stator Overcurrent Limit
+      const S = Math.sqrt(GenParams.P * GenParams.P + GenParams.Q * GenParams.Q);
+      const statorInd = document.getElementById('ind-stator');
+      if (S > GenParams.I_stator_max) {
+        setIndicator(statorInd, 'indicator-active-red', 'STATOR OVERCURRENT');
+        isAlarmTriggered = true;
+      } else {
+        setIndicator(statorInd, 'indicator-off', 'NORMAL');
+      }
+
+      // 3. Rotor Overcurrent Limit
+      const rotorInd = document.getElementById('ind-rotor');
+      if (GenParams.Q > 0.65 || GenParams.E_f > 1.85) {     // 1.65 default was too tight 
+        setIndicator(rotorInd, 'indicator-active-amber', 'ROTOR OVERHEATING');
+        isAlarmTriggered = true;
+      } else {
+        setIndicator(rotorInd, 'indicator-off', 'NORMAL');
+      }
+
+      // 4. Pole Slip / Practical Stability Limit
+      const stability_Q_limit = -0.35 - 0.25 * (1.0 - GenParams.P); 
+      const poleInd = document.getElementById('ind-poleslip');
+      if (GenParams.Q < stability_Q_limit || (GenParams.delta * 180 / Math.PI) > 70) {
+        setIndicator(poleInd, 'indicator-active-red', 'POLE SLIP / UNSTABLE');
+        isAlarmTriggered = true;
+      } else {
+        setIndicator(poleInd, 'indicator-off', 'STABLE');
+      }
+
+      // Sync Hardware LED3 state on BBB
+      if (isAlarmTriggered !== bbbAlarmState) {
+        sendBBBHardwareAlarm(isAlarmTriggered);
+      }
+    }
+
+    function setIndicator(el, className, text) {
+      el.className = `indicator p-2 rounded-lg font-orbitron text-xs font-bold flex items-center justify-between ${className}`;
+      el.querySelector('.status-tag').innerText = text;
+    }
+
+    function drawCapabilityDiagram() {
+      if (!capCtx) return;
+      const w = capCanvas.width;
+      const h = capCanvas.height;
+
+      capCtx.clearRect(0, 0, w, h);
+
+      const originX = w * 0.48;
+      const originY = h * 0.82;
+      const scale = Math.min(w, h) * 0.42;
+
+      const toCanvasX = (q) => originX + q * scale;
+      const toCanvasY = (p) => originY - p * scale;
+
+      capCtx.lineWidth = 1;
+      capCtx.strokeStyle = 'rgba(51, 65, 85, 0.5)';
+      capCtx.fillStyle = '#64748b';
+      capCtx.font = '10px Orbitron';
+
+      capCtx.beginPath();
+      capCtx.moveTo(20, originY);
+      capCtx.lineTo(w - 20, originY);
+      capCtx.stroke();
+
+      capCtx.beginPath();
+      capCtx.moveTo(originX, 20);
+      capCtx.lineTo(originX, h - 20);
+      capCtx.stroke();
+
+      capCtx.fillText("Absorbing  MVAR (Leading PF)", originX - scale * 0.8 - 85, originY + 32);
+      capCtx.fillText("Capacitive MVAR", originX - scale * 0.8 - 85, originY + 44);      
+      capCtx.fillText("Exporting MVAR (Lagging PF) ", originX + scale * 0.35, originY + 18);
+      capCtx.fillText("Indictive MVAR", originX + scale * 0.35, originY + 32);
+      capCtx.fillText("MW", originX + 8, 30);
+
+      // Prime Mover Line
+      const yPM = toCanvasY(GenParams.P_prime_mover_max);
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#f59e0b';
+      capCtx.lineWidth = 2;
+      capCtx.setLineDash([5, 3]);
+      capCtx.moveTo(originX - scale * 0.9, yPM);
+      capCtx.lineTo(originX + scale * 0.9, yPM);
+      capCtx.stroke();
+      capCtx.setLineDash([]);
+      capCtx.fillStyle = '#f59e0b';
+      capCtx.fillText("Prime-mover Limit", originX + 60 - scale * 0.85, yPM - 6);
+
+      // Stator Heating Circle
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#ef4444';
+      capCtx.lineWidth = 2;
+      capCtx.arc(originX, originY, GenParams.I_stator_max * scale, Math.PI, 0, false);
+      capCtx.stroke();
+      capCtx.fillStyle = '#ef4444';
+      capCtx.fillText("Stator Heating Limit", originX + 15 + scale * 0.8, toCanvasY(0.75) + 30);
+
+      // Rotor Heating Arc
+      const pointAx = toCanvasX(-1.0 / GenParams.Xd);
+      const pointAy = originY;
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#3b82f6';
+      capCtx.lineWidth = 2;
+      capCtx.arc(pointAx, pointAy, 1.65 * scale, -Math.PI*0.1, -Math.PI*0.48, true);
+      capCtx.stroke();
+      capCtx.fillStyle = '#3b82f6';
+      capCtx.fillText("Rotor", originX + scale * 0.55, toCanvasY(0.35));
+      capCtx.fillText("Heating", originX + scale * 0.55, toCanvasY(0.25));
+      capCtx.fillText("Limit", originX + scale * 0.55, toCanvasY(0.15));
+      
+
+      // Stability Limit Arc
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#10b981';
+      capCtx.lineWidth = 2.5;
+      capCtx.moveTo(toCanvasX(-0.85), toCanvasY(0.0));
+      capCtx.quadraticCurveTo(
+        toCanvasX(-0.65), toCanvasY(0.5),
+        toCanvasX(-0.35), toCanvasY(GenParams.P_prime_mover_max)
+      );
+      capCtx.stroke();
+      capCtx.fillStyle = '#10b981';
+      capCtx.fillText("Practical", toCanvasX(-0.9), toCanvasY(0.4));
+      capCtx.fillText("Stability", toCanvasX(-0.9), toCanvasY(0.3));
+      capCtx.fillText("Limit", toCanvasX(-0.9), toCanvasY(0.2));
+
+      capCtx.fillStyle = '#e2e8f0';
+      capCtx.beginPath();
+      capCtx.arc(pointAx, pointAy, 4, 0, Math.PI * 2);
+      capCtx.fill();
+      capCtx.fillText("V² { 1 / Xq - 1 / Xd } / 2", pointAx - 63, pointAy + 18);
+
+      // Point P (P, Q)
+      const px = toCanvasX(GenParams.Q);
+      const py = toCanvasY(GenParams.P);
+
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#06b6d4';
+      capCtx.lineWidth = 2.5;
+      capCtx.moveTo(originX, originY);
+      capCtx.lineTo(px, py);
+      capCtx.stroke();
+
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#a855f7';
+      capCtx.lineWidth = 1.8;
+      capCtx.setLineDash([4, 4]);
+      capCtx.moveTo(pointAx, pointAy);
+      capCtx.lineTo(px, py);
+      capCtx.stroke();
+      capCtx.setLineDash([]);
+
+      capCtx.fillStyle = '#06b6d4';
+      capCtx.shadowColor = '#06b6d4';
+      capCtx.shadowBlur = 12;
+      capCtx.beginPath();
+      capCtx.arc(px, py, 6, 0, Math.PI * 2);
+      capCtx.fill();
+      capCtx.shadowBlur = 0;
+
+      capCtx.fillStyle = '#ffffff';
+      capCtx.font = 'bold 12px Orbitron';
+      capCtx.fillText("P", px + 8, py - 8);
+
+      const phi = Math.atan2(GenParams.P, GenParams.Q);
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#f59e0b';
+      capCtx.lineWidth = 1.5;
+      capCtx.arc(originX, originY, 35, -Math.PI/2, -phi, GenParams.Q < 0);
+      capCtx.stroke();
+      capCtx.fillStyle = '#f59e0b';
+      capCtx.font = '10px Rajdhani';
+      capCtx.fillText("φ", originX + (GenParams.Q >= 0 ? 12 : -18), originY - 38);
+
+      const angleAP = Math.atan2(originY - py, px - pointAx);
+      capCtx.beginPath();
+      capCtx.strokeStyle = '#a855f7';
+      capCtx.lineWidth = 1.5;
+      capCtx.arc(pointAx, pointAy, 45, 0, -angleAP, true);
+      capCtx.stroke();
+      capCtx.fillStyle = '#a855f7';
+      capCtx.fillText("δ", pointAx + 52, pointAy - 12);
+    }
+
+    function drawPFGauge() {
+      if (!pfCtx) return;
+      const w = pfCanvas.width;
+      const h = pfCanvas.height;
+      const cx = w / 2;
+      const cy = h / 2;
+      const radius = 65;
+
+      pfCtx.clearRect(0, 0, w, h);
+
+      pfCtx.beginPath();
+      pfCtx.arc(cx, cy, radius, 0, Math.PI * 2);
+      pfCtx.fillStyle = '#0f172a';
+      pfCtx.fill();
+      pfCtx.lineWidth = 3;
+      pfCtx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
+      pfCtx.stroke();
+
+      pfCtx.beginPath();
+      pfCtx.arc(cx, cy, radius - 6, Math.PI * 0.75, Math.PI * 1.5);
+      pfCtx.strokeStyle = '#06b6d4';
+      pfCtx.lineWidth = 5;
+      pfCtx.stroke();
+
+      pfCtx.beginPath();
+      pfCtx.arc(cx, cy, radius - 6, Math.PI * 1.5, Math.PI * 2.25);
+      pfCtx.strokeStyle = '#10b981';
+      pfCtx.lineWidth = 5;
+      pfCtx.stroke();
+
+      pfCtx.fillStyle = '#94a3b8';
+      pfCtx.font = '9px Orbitron';
+      pfCtx.textAlign = 'center';
+      pfCtx.fillText("1.0", cx, cy - radius + 22);
+      pfCtx.fillText("0.5 Ld", cx - radius + 20, cy + 18);
+      pfCtx.fillText("0.5 Lg", cx + radius - 20, cy + 18);
+
+      let targetAngle = -Math.PI / 2;
+      if (GenParams.pf_type === 'LEAD') {
+        const factor = (1.0 - GenParams.pf) / 0.5;
+        targetAngle = -Math.PI / 2 - factor * (Math.PI * 0.35);
+      } else {
+        const factor = (1.0 - GenParams.pf) / 0.5;
+        targetAngle = -Math.PI / 2 + factor * (Math.PI * 0.35);
+      }
+
+      pfCtx.save();
+      pfCtx.translate(cx, cy);
+      pfCtx.rotate(targetAngle + Math.PI/2);
+
+      pfCtx.beginPath();
+      pfCtx.moveTo(-3, 0);
+      pfCtx.lineTo(0, -radius + 14);
+      pfCtx.lineTo(3, 0);
+      pfCtx.fillStyle = '#ef4444';
+      pfCtx.fill();
+      pfCtx.restore();
+
+      pfCtx.beginPath();
+      pfCtx.arc(cx, cy, 5, 0, Math.PI * 2);
+      pfCtx.fillStyle = '#e2e8f0';
+      pfCtx.fill();
+
+      document.getElementById('pf-value-display').innerText = 
+        `PF: ${GenParams.pf.toFixed(2)} ${GenParams.pf_type}`;
+    }
+
+    function initChart() {
+      const ctx = document.getElementById('mainChart').getContext('2d');
+
+      mainChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: Array.from({length: 100}, (_, i) => (i * 0.1).toFixed(1) + 's'),
+          datasets: []
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          scales: {
+            x: {
+              grid: { color: 'rgba(51, 65, 85, 0.3)' },
+              ticks: { color: '#64748b', font: { family: 'Orbitron', size: 10 } }
+            },
+            y: {
+              grid: { color: 'rgba(51, 65, 85, 0.3)' },
+              ticks: { color: '#64748b', font: { family: 'Orbitron', size: 10 } }
+            }
+          },
+          plugins: {
+            legend: {
+              labels: { color: '#cbd5e1', font: { family: 'Orbitron', size: 11 } }
+            }
+          }
+        }
+      });
+    }
+
+    function setupChartDatasets() {
+      if (!mainChart) return;
+
+      if (currentMode === 'Animation_1' || currentMode === 'Animation_2') {
+        mainChart.data.datasets = [
+          { label: 'Voltage V(t)', data: [], borderColor: '#06b6d4', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+          { label: 'Current I(t)', data: [], borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+          { label: 'Active Power (MW)', data: [], borderColor: '#10b981', borderWidth: 1.5, borderDash: [4, 4], pointRadius: 0 },
+          { label: 'Reactive Power (MVAR)', data: [], borderColor: '#a855f7', borderWidth: 1.5, borderDash: [4, 4], pointRadius: 0 }
+        ];
+      } else {
+        mainChart.data.datasets = [
+          { label: 'Line1: Natural Oscillation', data: [], borderColor: '#f59e0b', borderWidth: 2, pointRadius: 0 },
+          { label: 'Line2: Raw Washout', data: [], borderColor: '#3b82f6', borderWidth: 1.5, pointRadius: 0 },
+          { label: 'Line3: No DC Offset', data: [], borderColor: '#14b8a6', borderWidth: 1.5, pointRadius: 0 },
+          { label: 'Line4: Lead-Lag Output', data: [], borderColor: '#a855f7', borderWidth: 1.5, pointRadius: 0 },
+          { label: 'Line5: PSS Signal (Vpss)', data: [], borderColor: '#f43f5e', borderWidth: 2.5, pointRadius: 0 }
+        ];
+      }
+      mainChart.update('none');
+    }
+
+    let chartTime = 0;
+    function updateChartData() {
+      if (!mainChart) return;
+      chartTime += 0.4956;  // edit speed for scope of VI . 0.5 = full stop
+
+      if (currentMode === 'Animation_1' || currentMode === 'Animation_2') {
+        const S = Math.sqrt(GenParams.P * GenParams.P + GenParams.Q * GenParams.Q);
+        const phi = Math.acos(GenParams.pf) * (GenParams.Q >= 0 ? -1 : 1);
+
+        const labels = [];
+        const vData = [];
+        const iData = [];
+        const pData = [];
+        const qData = [];
+
+        for (let i = 0; i < 100; i++) {
+          const t = chartTime + i * 0.04;
+          labels.push(t.toFixed(1));
+          
+          const v = Math.sin(2 * Math.PI * 1.0 * t);
+          const currentMag = Math.min(1.5, S);
+          const currentWave = currentMag * Math.sin(2 * Math.PI * 1.0 * t + phi);
+
+          vData.push(v);
+          iData.push(currentWave);
+          pData.push(GenParams.P);
+          qData.push(GenParams.Q);
+        }
+
+        mainChart.data.labels = labels;
+        mainChart.data.datasets[0].data = vData;
+        mainChart.data.datasets[1].data = iData;
+        mainChart.data.datasets[2].data = pData;
+        mainChart.data.datasets[3].data = qData;
+
+      } else if (currentMode === 'Animation_3') {
+        GenParams.osc_time += 0.05;
+
+        const labels = [];
+        const line1 = [];
+        const line2 = [];
+        const line3 = [];
+        const line4 = [];
+        const line5 = [];
+
+        const damping = GenParams.pss_enabled ? 0.35 : 0.01;
+
+        for (let i = 0; i < 100; i++) {
+          const t = i * 0.1;
+          labels.push(t.toFixed(1) + 's');
+
+          const envelope = Math.exp(-damping * t);
+          const baseOsc = 45 + 45 * Math.sin(2 * Math.PI * GenParams.osc_freq * (t + GenParams.osc_time)) * envelope;
+          line1.push(baseOsc);
+
+          const dcOffset = 45;
+          const noDcSignal = (baseOsc - dcOffset) * (GenParams.tw / (GenParams.tw + 1.0));
+          line2.push(baseOsc - dcOffset * 0.5);
+          line3.push(noDcSignal);
+
+          const leadLagGain = (1 + GenParams.t1 * 0.1) / (1 + GenParams.t2 * 0.1);
+          const line4Val = noDcSignal * leadLagGain * 0.005;
+          line4.push(line4Val);
+
+          let line5Val = Math.max(-GenParams.vpss_limit, Math.min(GenParams.vpss_limit, line4Val));
+          line5.push(line5Val);
+        }
+
+        mainChart.data.labels = labels;
+        mainChart.data.datasets[0].data = line1;
+        mainChart.data.datasets[1].data = line2;
+        mainChart.data.datasets[2].data = line3;
+        mainChart.data.datasets[4].data = line5;
+      }
+
+      mainChart.update('none');
+    }
+
+    // Fetch live telemetry from the C daemon running on the BBB
+    // Fetch live telemetry from the C daemon running on the BBB automatically
+    async function fetchTelemetry() {
+        try {
+            let response = await fetch('http://100.114.205.29:9000');
+            let data = await response.json();
+            
+            // Map JSON response directly to your dashboard's active variables
+            if (data) {
+                GenParams.P = data.active_power_mw;
+                GenParams.Q = data.reactive_power_mvar;
+                GenParams.pf = data.power_factor;
+                GenParams.is_leading = data.is_leading;
+                
+                // Update UI Indicator Alarms dynamically from BBB daemon alarms
+                updateAlarmUI(data.alarms);
+            }
+        } catch (error) {
+            console.error("Telemetry connection error:", error);
+        }
+    }
+
+    function updateAlarmUI(alarms) {
+        if (!alarms) return;
+        // Example binding to your HTML indicator elements
+        document.getElementById('indMW').className = "indicator-box " + (alarms.mw_limit ? "alarm" : "");
+        document.getElementById('indRotor').className = "indicator-box " + (alarms.rotor_overcurrent ? "alarm" : "");
+        document.getElementById('indStator').className = "indicator-box " + (alarms.stator_overcurrent ? "alarm" : "");
+        document.getElementById('indPole').className = "indicator-box " + (alarms.pole_slip ? "alarm" : "");
+    }
+
+    function animationLoop() {
+        updatePhysics();
+        drawCapabilityDiagram();
+        drawPFGauge();
+        updateChartData();
+
+        requestAnimationFrame(animationLoop);
+    }
+
+    // Poll the BBB C daemon telemetry endpoint every 1 second continuously
+    setInterval(fetchTelemetry, 1000);
+
+    // Start the 60fps canvas animation and chart loop
+    requestAnimationFrame(animationLoop);
+
+  </script>
+</body>
+</html>
+```

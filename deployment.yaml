@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: synchronous-generator-lab
+  labels:
+    app: generator-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: generator-lab
+  template:
+    metadata:
+      labels:
+        app: generator-lab
+    spec:
+      containers:
+      - name: generator-ctrl
+        image: your-dockerhub-username/synchronous-generator-lab:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9000
+          name: web-telemetry
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: generator-lab-svc
+spec:
+  type: LoadBalancer # Or NodePort / ClusterIP depending on your cluster
+  selector:
+    app: generator-lab
+  ports:
+  - port: 9000
+    targetPort: 9000
